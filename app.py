@@ -144,17 +144,53 @@ def load_vector_db():
 def load_local_embedding_model():
     return SentenceTransformer(EMBEDDING_MODEL_NAME)
 
-def get_embedding_local(text: str):
+# Cache recent query embeddings to avoid recomputing for similar queries
+@st.cache_data(ttl=3600)
+def cached_query_embedding(text: str):
     return load_local_embedding_model().encode(text)
 
-def search_relevant_sections_semantic(user_query: str, db_data: List[Dict]):
+def get_embedding_local(text: str):
+    # Wrap the cached function for easy replacement
+    return cached_query_embedding(text)
+
+@st.cache_resource
+def load_embeddings_matrix():
+    """Load vector DB into efficient numpy arrays and normalized embeddings for fast similarity search."""
+    db_data = load_vector_db()
     if not db_data:
+        return None
+
+    texts = [item.get("text", item.get("raw_text", "")) for item in db_data]
+    ids = [item.get("section_number", item.get("id", idx)) for idx, item in enumerate(db_data)]
+
+    try:
+        emb = np.array([np.array(item["embedding"]) for item in db_data])
+    except Exception:
+        # Fallback if embeddings missing or malformed
+        emb = np.empty((0,))
+
+    if emb.size == 0:
+        return {"texts": texts, "ids": ids, "emb": emb, "emb_norm": emb, "raw": db_data}
+
+    norms = np.linalg.norm(emb, axis=1, keepdims=True)
+    emb_norm = emb / np.clip(norms, 1e-9, None)
+
+    return {"texts": texts, "ids": ids, "emb": emb, "emb_norm": emb_norm, "raw": db_data}
+
+
+def search_relevant_sections_semantic(user_query: str, db_data: List[Dict]):
+    """Fast semantic search using precomputed normalized embeddings and cached query embeddings."""
+    matrix = load_embeddings_matrix()
+    if not matrix or matrix["emb_norm"].size == 0:
         return []
-    query_embedding = get_embedding_local(user_query)
-    sims = cosine_similarity([query_embedding],
-                             [np.array(item["embedding"]) for item in db_data])[0]
+
+    q = get_embedding_local(user_query)
+    q_norm = q / (np.linalg.norm(q) + 1e-9)
+
+    sims = matrix["emb_norm"].dot(q_norm)
     top_k = np.argsort(sims)[::-1][:NUM_RAG_RESULTS]
-    return [(db_data[i].get("section_number", f"N/A-{i}"), db_data[i].get("text","")) for i in top_k]
+
+    return [(matrix["ids"][i], matrix["texts"][i]) for i in top_k]
 
 # ==============================================================
 # LLM RESPONSE WITH EXPONENTIAL BACKOFF + FALLBACK
@@ -522,11 +558,22 @@ def main_app_interface():
         st.session_state.last_references = []
         st.session_state.messages.append({"role": "user", "content": prompt})
 
-        # Show non-blocking thinking message (UI stays responsive)
-        st.info("🤔 Analyzing legal statutes...")
-        
+        # Fast retrieval displayed immediately to improve perceived latency
+        st.info("🔎 Retrieving relevant sections...")
         results = search_relevant_sections_semantic(prompt, db_data)
-        response = generate_llm_response(prompt, results)
+
+        # Show retrieved sections right away (short snippets)
+        if results:
+            retrieved_text = "\n\n".join([f"**Section {s}:** {t[:600]}..." for s, t in results])
+        else:
+            retrieved_text = "No matching sections found."
+
+        st.session_state.messages.append({"role": "assistant", "content": "🔎 Retrieved relevant sections:\n\n" + retrieved_text})
+
+        # Now generate a full, human-friendly explanation (may take longer)
+        with st.spinner("🤖 Generating summarized explanation..."):
+            response = generate_llm_response(prompt, results)
+
         st.session_state.messages.append({"role": "assistant", "content": response})
         db.log_interaction(username, prompt, response, [s for s,_ in results])
 
