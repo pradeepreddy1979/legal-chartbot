@@ -8,7 +8,7 @@ An interactive Streamlit application that helps users find relevant Indian legal
 
 ## **Project Overview**
 - **Purpose:** Assist students, lawyers, and individuals to quickly locate and understand Indian legal sections (IPC, CrPC, and other acts).
-- **Architecture:** Local vector store for semantic search (embeddings), optional LLM generation (Gemini), and a Streamlit chat UI.
+- **Architecture:** Local vector store  for semantic search (embeddings), optional LLM generation (Gemini), and a Streamlit chat UI.
 
 ---
 
